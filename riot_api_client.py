@@ -1,134 +1,452 @@
 import requests
 import csv
 import time
+import os
 
-# Twój klucz API
-RIOT_API_KEY = "RGAPI-e7cbc798-98fe-4ca7-a96b-4a997dbacb34"
-MATCH_URL = "https://europe.api.riotgames.com/lol/match/v5/matches"
+###############################################################################
+# 1. KONFIGURACJA
+###############################################################################
+RIOT_API_KEY = "RGAPI-8f0faf67-eeab-4da0-b629-f3c918cfaa38"  # <-- Twój aktualny klucz
+MATCH_REGION_BASE_URL = "https://europe.api.riotgames.com"  # Dla PUUID z EU
+BASE_DOMAIN = "eun1.api.riotgames.com"
 
 HEADERS = {
     "X-Riot-Token": RIOT_API_KEY
 }
 
-# Funkcja: Pobierz historię meczów na podstawie PUUID
-def get_match_history(puuid, count=10):
-    url = f"{MATCH_URL}/by-puuid/{puuid}/ids?count={count}"
-    response = requests.get(url, headers=HEADERS)
-    if response.status_code == 200:
-        return response.json()
-    else:
-        print(f"Błąd {response.status_code}: {response.text}")
-        return []
+# Mapa platformId -> domeny do League-V4 / Summoner-V4 / Champion Mastery V4
+PLATFORM_MAP = {
+    "EUW1": "euw1.api.riotgames.com",
+    "EUN1": "eun1.api.riotgames.com",
+    "NA1":  "na1.api.riotgames.com",
+    "KR":   "kr.api.riotgames.com",
+    "TR1":  "tr1.api.riotgames.com",
+    "RU":   "ru.api.riotgames.com",
+    "BR1":  "br1.api.riotgames.com",
+    "LA1":  "la1.api.riotgames.com",
+    "LA2":  "la2.api.riotgames.com",
+    "OC1":  "oc1.api.riotgames.com",
+    # Dodaj w razie potrzeby
+}
 
-# Funkcja: Pobierz szczegóły meczu
-def get_match_details(match_id):
-    url = f"{MATCH_URL}/{match_id}"
-    response = requests.get(url, headers=HEADERS)
-    try:
-        if response.status_code == 200:
-            return response.json()
-        elif response.status_code == 429:  # Rate limit exceeded
-            retry_after = int(response.headers.get("Retry-After", 1))
-            print(f"Limit zapytań przekroczony. Ponowne próby za {retry_after} sekund.")
-            time.sleep(retry_after)
-            return get_match_details(match_id)  # Ponów próbę po czasie
-        elif response.status_code in [500, 502, 503, 504]:  # Problemy serwera
-            print(f"Błąd serwera: {response.status_code}. Ponawiam próbę...")
-            time.sleep(5)
-            return get_match_details(match_id)  # Ponów próbę
-        else:
-            print(f"Błąd {response.status_code}: {response.text}")
-            return None
-    except requests.exceptions.JSONDecodeError:
-        print(f"Błąd: Serwer zwrócił nieprawidłową odpowiedź dla meczu {match_id}.")
+RETRIES_LIMIT = 5     # Ile razy ponawiamy zapytanie
+CHUNK_SIZE = 100       # Co ile nowych wierszy zapisujemy plik
+MAX_ROWS = 100000        # Ile łącznie rekordów chcemy zebrać
+
+###############################################################################
+# 2. FUNKCJA: do_request - uniwersalne zapytanie z retry
+###############################################################################
+def do_request(url, method="GET", params=None, headers=None, retries=0):
+    """
+    Wykonuje zapytanie HTTP z obsługą:
+    - 429 (limit zapytań) -> odczekanie Retry-After i ponowienie
+    - 5xx (błąd serwera) -> krótka pauza i ponowienie
+    - limit ponowień (RETRIES_LIMIT)
+    """
+    if headers is None:
+        headers = {}
+    if retries > RETRIES_LIMIT:
+        print(f"Przekroczono maksymalną liczbę prób ({RETRIES_LIMIT}). URL: {url}")
         return None
 
-# Funkcja: Przetwarzanie danych meczu
-def process_match_data(match_data, puuid_pool):
     try:
-        match_info = match_data.get("info", {})
-        participants = match_info.get("participants", [])
-        processed_data = []
+        if method == "GET":
+            resp = requests.get(url, params=params, headers=headers)
+        else:
+            resp = requests.request(method, url, params=params, headers=headers)
 
-        for participant in participants:
-            # Dodaj nowych graczy do puli PUUID
-            if participant.get("puuid") not in puuid_pool:
-                puuid_pool.add(participant.get("puuid"))
+        if resp.status_code == 200:
+            return resp
+        elif resp.status_code == 429:
+            retry_after = int(resp.headers.get("Retry-After", 1))
+            print(f"HTTP 429 - limit zapytań. Czekam {retry_after}s. URL: {url}")
+            time.sleep(retry_after)
+            return do_request(url, method, params, headers, retries=retries+1)
+        elif resp.status_code in [500, 502, 503, 504]:
+            print(f"HTTP {resp.status_code} - Błąd serwera. Czekam 5s. URL: {url}")
+            time.sleep(5)
+            return do_request(url, method, params, headers, retries=retries+1)
+        else:
+            print(f"HTTP {resp.status_code}: {resp.text} (URL: {url})")
+            return None
 
-            # Zapisz szczegółowe dane gracza
-            processed_data.append({
-                "match_id": match_info.get("gameId"),
-                "game_duration": match_info.get("gameDuration"),
-                "queue_id": match_info.get("queueId"),
-                "summoner_name": participant.get("summonerName"),
-                "team_id": participant.get("teamId"),
-                "champion_name": participant.get("championName"),
-                "kills": participant.get("kills"),
-                "deaths": participant.get("deaths"),
-                "assists": participant.get("assists"),
-                "gold_earned": participant.get("goldEarned"),
-                "total_damage_dealt": participant.get("totalDamageDealtToChampions"),
-                "vision_score": participant.get("visionScore"),
-                "total_minions_killed": participant.get("totalMinionsKilled"),
-                "damage_self_mitigated": participant.get("damageSelfMitigated"),
-                "time_ccing_others": participant.get("timeCCingOthers"),
-                "largest_killing_spree": participant.get("largestKillingSpree"),
-                "largest_multi_kill": participant.get("largestMultiKill"),
-                "win": participant.get("win")
-            })
-        return processed_data
-    except Exception as e:
-        print(f"Wystąpił błąd podczas przetwarzania danych meczu: {e}")
+    except requests.exceptions.RequestException as e:
+        print(f"Wyjątek requests: {e}. URL: {url}")
+        time.sleep(2)
+        return do_request(url, method, params, headers, retries=retries+1)
+
+###############################################################################
+# 3. FUNKCJE DO POBIERANIA DANYCH (Match, Timeline, Rangi, Mastery)
+###############################################################################
+def get_match_history(puuid, count=10):
+    """
+    Pobiera listę ID meczów (str) dla danego PUUID z region-based (Match-V5).
+    """
+    url = f"{MATCH_REGION_BASE_URL}/lol/match/v5/matches/by-puuid/{puuid}/ids"
+    params = {"count": count}
+    resp = do_request(url, "GET", params=params, headers=HEADERS)
+    if resp and resp.status_code == 200:
+        return resp.json()  # lista match_id
+    return []
+
+def get_match_details(match_id):
+    """
+    Pobiera pełne szczegóły meczu z region-based (Match-V5).
+    """
+    url = f"{MATCH_REGION_BASE_URL}/lol/match/v5/matches/{match_id}"
+    resp = do_request(url, headers=HEADERS)
+    if resp and resp.status_code == 200:
+        return resp.json()
+    return None
+
+def get_match_timeline(match_id):
+    """
+    Pobiera timeline meczu z region-based (Match-V5).
+    """
+    url = f"{MATCH_REGION_BASE_URL}/lol/match/v5/matches/{match_id}/timeline"
+    resp = do_request(url, headers=HEADERS)
+    if resp and resp.status_code == 200:
+        return resp.json()
+    return None
+
+# Cache rangi (by uniknąć wielokrotnych zapytań)
+summoner_rank_cache = {}
+def get_summoner_rank(summoner_id, platform_id):
+    """
+    Pobiera informacje o randze (SoloQ, Flex) z League-V4 (platform-based).
+    Zwraca słownik z polami: solo_tier, solo_rank, itp.
+    """
+    if not summoner_id or not platform_id:
+        return {}
+    cache_key = f"{platform_id}:{summoner_id}"
+    if cache_key in summoner_rank_cache:
+        return summoner_rank_cache[cache_key]
+
+    base_domain = PLATFORM_MAP.get(platform_id.upper(), BASE_DOMAIN)
+    url = f"https://{base_domain}/lol/league/v4/entries/by-summoner/{summoner_id}"
+    resp = do_request(url, headers=HEADERS)
+    rank_info = {
+        "solo_tier": None, "solo_rank": None, "solo_lp": None,
+        "solo_wins": None, "solo_losses": None,
+        "flex_tier": None, "flex_rank": None, "flex_lp": None,
+        "flex_wins": None, "flex_losses": None,
+    }
+    if resp and resp.status_code == 200:
+        data = resp.json()  # lista
+        for entry in data:
+            q_type = entry.get("queueType")
+            if q_type == "RANKED_SOLO_5x5":
+                rank_info["solo_tier"] = entry.get("tier")
+                rank_info["solo_rank"] = entry.get("rank")
+                rank_info["solo_lp"]   = entry.get("leaguePoints")
+                rank_info["solo_wins"] = entry.get("wins")
+                rank_info["solo_losses"] = entry.get("losses")
+            elif q_type == "RANKED_FLEX_SR":
+                rank_info["flex_tier"] = entry.get("tier")
+                rank_info["flex_rank"] = entry.get("rank")
+                rank_info["flex_lp"]   = entry.get("leaguePoints")
+                rank_info["flex_wins"] = entry.get("wins")
+                rank_info["flex_losses"] = entry.get("losses")
+    summoner_rank_cache[cache_key] = rank_info
+    return rank_info
+
+# Cache champion mastery
+champion_mastery_cache = {}
+def get_champion_mastery(puuid, champion_id):
+    """
+    Pobiera champion mastery dla (PUUID, championId).
+    (W praktyce dla platform-based champion-mastery, trzeba użyć euw1/eun1 itp.)
+    W przykładzie uprościmy: domyślnie EUW1
+    """
+    if not puuid or champion_id is None:
+        return {}
+    cache_key = f"{puuid}:{champion_id}"
+    if cache_key in champion_mastery_cache:
+        return champion_mastery_cache[cache_key]
+
+    # Domyślnie euw1
+    base_domain = BASE_DOMAIN
+    url = f"https://{base_domain}/lol/champion-mastery/v4/champion-masteries/by-puuid/{puuid}/by-champion/{champion_id}"
+    resp = do_request(url, headers=HEADERS)
+
+    mastery_data = {
+        "champion_mastery_level": None,
+        "champion_mastery_points": None,
+        "champion_mastery_lastPlayTime": None,
+        "champion_mastery_pointsSinceLastLevel": None,
+        "champion_mastery_pointsUntilNextLevel": None,
+        "champion_mastery_tokensEarned": None,
+    }
+    if resp and resp.status_code == 200:
+        dto = resp.json()
+        mastery_data["champion_mastery_level"] = dto.get("championLevel")
+        mastery_data["champion_mastery_points"] = dto.get("championPoints")
+        mastery_data["champion_mastery_lastPlayTime"] = dto.get("lastPlayTime")
+        mastery_data["champion_mastery_pointsSinceLastLevel"] = dto.get("championPointsSinceLastLevel")
+        mastery_data["champion_mastery_pointsUntilNextLevel"] = dto.get("championPointsUntilNextLevel")
+        mastery_data["champion_mastery_tokensEarned"] = dto.get("tokensEarned")
+
+    champion_mastery_cache[cache_key] = mastery_data
+    return mastery_data
+
+###############################################################################
+# 4. Pobieranie finalnych championStats z timeline (ostatnia ramka)
+###############################################################################
+def get_final_champion_stats(timeline_data, participant_id):
+    """
+    Zwraca championStats z ostatniej klatki timeline dla gracza o participantId.
+    (Zwracamy dict z polami abilityHaste, armor, etc. z prefixem "final_".)
+    """
+    result = {}
+    if not timeline_data:
+        return result
+
+    info = timeline_data.get("info", {})
+    frames = info.get("frames", [])
+    if not frames:
+        return result
+
+    # Ostatnia ramka
+    last_frame = frames[-1]
+    participant_frames = last_frame.get("participantFrames", {})
+
+    # Klucz w participantFrames to np. "1", "2", "3" ... "10"
+    p_key = str(participant_id)
+    frame_data = participant_frames.get(p_key, {})
+    champ_stats = frame_data.get("championStats", {})
+
+    # Pola z championStatsDto
+    # Tworzymy słownik z prefixem "final_"
+    for field in [
+        "abilityHaste","abilityPower","armor","armorPen","armorPenPercent",
+        "attackDamage","attackSpeed","bonusArmorPenPercent","bonusMagicPenPercent",
+        "ccReduction","cooldownReduction","health","healthMax","healthRegen",
+        "lifesteal","magicPen","magicPenPercent","magicResist","movementSpeed",
+        "omnivamp","physicalVamp","power","powerMax","powerRegen","spellVamp"
+    ]:
+        val = champ_stats.get(field, None)
+        result[f"final_{field}"] = val
+
+    return result
+
+###############################################################################
+# 5. PRZETWARZANIE DANYCH MECZU (usuwamy zbędne pola)
+###############################################################################
+def process_match_data(match_data, timeline_data, puuid_pool):
+    """
+    Zwraca listę wierszy (dict). Usuwamy niechciane pola, dodajemy final championStats itd.
+    """
+    if not match_data:
         return []
 
-# Funkcja: Zapisz dane do pliku CSV
-def save_to_csv(data, filename="all_league_data.csv"):
-    if not data:
-        print("Brak danych do zapisania.")
+    info = match_data["info"]
+    participants = info.get("participants", [])
+    platform_id = info.get("platformId")
+
+    # Pola meczowe, które zostawiamy
+    # (usuwamy np. game_creation, game_end_timestamp, game_name, itp. - wg wymagań)
+    keep_game_id = info.get("gameId")
+    keep_game_duration = info.get("gameDuration")
+    keep_game_mode = info.get("gameMode")
+    keep_game_type = info.get("gameType")
+    keep_game_version = info.get("gameVersion")
+    keep_map_id = info.get("mapId")
+    keep_queue_id = info.get("queueId")
+
+    rows = []
+    for part in participants:
+        p = part.get("puuid")
+        if p and p not in puuid_pool:
+            puuid_pool.add(p)
+
+        summoner_id = part.get("summonerId")
+        rank_data = get_summoner_rank(summoner_id, platform_id)
+
+        champion_id = part.get("championId")
+        mastery_data = get_champion_mastery(p, champion_id)
+
+        # pobierz statystyki championStats z final frame w timeline
+        participant_id = part.get("participantId")
+        final_stats = get_final_champion_stats(timeline_data, participant_id)
+
+        row_data = {
+            # Pozostawione pola meczu
+            "game_id": keep_game_id,
+            "game_duration": keep_game_duration,
+            "game_mode": keep_game_mode,
+            "game_type": keep_game_type,
+            "game_version": keep_game_version,
+            "map_id": keep_map_id,
+            "platform_id": platform_id,
+            "queue_id": keep_queue_id,
+
+            # Uczestnik
+            "participant_id": participant_id,
+            "puuid": p,
+            "summoner_name": part.get("summonerName"),
+            "summoner_id": summoner_id,
+            "summoner_level": part.get("summonerLevel"),
+            "champion_id": champion_id,
+            "champion_name": part.get("championName"),
+            "team_id": part.get("teamId"),
+            "win": part.get("win"),
+
+            # Pozycja
+            "individual_position": part.get("individualPosition"),
+            "team_position": part.get("teamPosition"),
+            "lane": part.get("lane"),
+            "role": part.get("role"),
+
+            # K/D/A
+            "kills": part.get("kills"),
+            "deaths": part.get("deaths"),
+            "assists": part.get("assists"),
+
+            # Inne przydatne pola
+            "baron_kills": part.get("baronKills"),
+            "dragon_kills": part.get("dragonKills"),
+            "gold_earned": part.get("goldEarned"),
+            "gold_spent": part.get("goldSpent"),
+            "total_damage_dealt": part.get("totalDamageDealt"),
+            "total_damage_dealt_to_champions": part.get("totalDamageDealtToChampions"),
+            "physical_damage_dealt_to_champions": part.get("physicalDamageDealtToChampions"),
+            "magic_damage_dealt_to_champions": part.get("magicDamageDealtToChampions"),
+            "true_damage_dealt_to_champions": part.get("trueDamageDealtToChampions"),
+            "damage_dealt_to_objectives": part.get("damageDealtToObjectives"),
+            "damage_dealt_to_turrets": part.get("damageDealtToTurrets"),
+            "total_damage_taken": part.get("totalDamageTaken"),
+            "physical_damage_taken": part.get("physicalDamageTaken"),
+            "magic_damage_taken": part.get("magicDamageTaken"),
+            "true_damage_taken": part.get("trueDamageTaken"),
+            "time_ccing_others": part.get("timeCCingOthers"),
+            "vision_score": part.get("visionScore"),
+            "wards_placed": part.get("wardsPlaced"),
+            "wards_killed": part.get("wardsKilled"),
+            "vision_wards_bought_in_game": part.get("visionWardsBoughtInGame"),
+
+            # Itemy
+            "item0": part.get("item0"),
+            "item1": part.get("item1"),
+            "item2": part.get("item2"),
+            "item3": part.get("item3"),
+            "item4": part.get("item4"),
+            "item5": part.get("item5"),
+            "item6": part.get("item6"),
+
+            # Rangi
+            "solo_tier": rank_data.get("solo_tier"),
+            "solo_rank": rank_data.get("solo_rank"),
+            "solo_lp":   rank_data.get("solo_lp"),
+            "solo_wins": rank_data.get("solo_wins"),
+            "solo_losses": rank_data.get("solo_losses"),
+
+            "flex_tier": rank_data.get("flex_tier"),
+            "flex_rank": rank_data.get("flex_rank"),
+            "flex_lp":   rank_data.get("flex_lp"),
+            "flex_wins": rank_data.get("flex_wins"),
+            "flex_losses": rank_data.get("flex_losses"),
+
+            # Champion Mastery (bez chestGranted)
+            "champion_mastery_level": mastery_data.get("champion_mastery_level"),
+            "champion_mastery_points": mastery_data.get("champion_mastery_points"),
+            "champion_mastery_lastPlayTime": mastery_data.get("champion_mastery_lastPlayTime"),
+            "champion_mastery_pointsSinceLastLevel": mastery_data.get("champion_mastery_pointsSinceLastLevel"),
+            "champion_mastery_pointsUntilNextLevel": mastery_data.get("champion_mastery_pointsUntilNextLevel"),
+            "champion_mastery_tokensEarned": mastery_data.get("champion_mastery_tokensEarned"),
+        }
+
+        # Dodaj final championStats z timeline
+        row_data.update(final_stats)
+
+        rows.append(row_data)
+
+    return rows
+
+###############################################################################
+# 6. Zapisywanie chunków z nazwą -> league_data_{liczba_wierszy}.csv
+###############################################################################
+def save_chunk_to_csv(data_list):
+    """
+    Zapisuje WSZYSTKIE dane (data_list) do pliku CSV.
+    Nazwa pliku: league_data_{len(data_list)}.csv
+    Usuwa poprzedni plik (league_data_{len(data_list)-CHUNK_SIZE}.csv), jeśli istnieje.
+    """
+    if not data_list:
+        print("Brak danych do zapisania - pomijam.")
         return
 
-    keys = data[0].keys()
-    with open(filename, "w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=keys)
-        writer.writeheader()
-        writer.writerows(data)
-    print(f"Dane zapisano do pliku {filename}")
+    row_count = len(data_list)
+    filename = f"league_data_{row_count}.csv"
+    keys = data_list[0].keys()
 
-# Główna logika programu
+    with open(filename, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=keys)
+        writer.writeheader()
+        writer.writerows(data_list)
+
+    print(f"[SAVE] Zapisano {row_count} wierszy do pliku: {filename}")
+
+    # Usunięcie poprzedniego pliku, np. league_data_{row_count - CHUNK_SIZE}.csv
+    prev_count = row_count - CHUNK_SIZE
+    if prev_count > 0:
+        prev_filename = f"league_data_{prev_count}.csv"
+        if os.path.exists(prev_filename):
+            os.remove(prev_filename)
+            print(f"Usunięto poprzedni plik: {prev_filename}")
+
+###############################################################################
+# 7. GŁÓWNA LOGIKA - PĘTLA POBIERANIA
+###############################################################################
 if __name__ == "__main__":
     initial_puuid = "y9C_DhIv5uEzpvUL8HE95aL2OtIgh9gI25v0TS_aaFC8DQYXrWSr7r6HIEHsTxLvpxlL1VdeWkvOFQ"
     puuid_pool = {initial_puuid}
     processed_matches = set()
     all_data = []
 
-    while len(all_data) < 200000:  # Limit danych do 100,000 wierszy
-        if not puuid_pool:
-            break
+    total_rows = 0
+    rows_since_last_save = 0
 
+    while total_rows < MAX_ROWS and puuid_pool:
         current_puuid = puuid_pool.pop()
-        print(f"Pobieranie historii meczów dla PUUID: {current_puuid}")
-        match_history = get_match_history(current_puuid, count=10)
+        print(f"[INFO] Pobieram historię meczów dla PUUID: {current_puuid}")
+        match_ids = get_match_history(current_puuid, count=10)
 
-        for match_id in match_history:
+        for match_id in match_ids:
             if match_id in processed_matches:
                 continue
-            print(f"Pobieranie szczegółów meczu {match_id}")
-            match_data = get_match_details(match_id)
-            if match_data:
+
+            print(f"  -> Szczegóły meczu {match_id}")
+            match_details = get_match_details(match_id)
+            if match_details:
                 processed_matches.add(match_id)
-                match_results = process_match_data(match_data, puuid_pool)
-                all_data.extend(match_results)
 
-                # Zapisuj co 10,000 wierszy, aby uniknąć utraty danych
-                if len(all_data) % 10000 == 0:
-                    save_to_csv(all_data, filename=f"league_data_{len(all_data)}.csv")
-                    print(f"Zapisano dane po {len(all_data)} wierszach.")
+                # Pobieramy timeline
+                print(f"  -> Timeline meczu {match_id}")
+                timeline = get_match_timeline(match_id)
 
-                time.sleep(1)  # Wstrzymaj na 1 sekundę, aby uniknąć limitów API
+                new_rows = process_match_data(match_details, timeline, puuid_pool)
+                for row in new_rows:
+                    all_data.append(row)
+                    total_rows += 1
+                    rows_since_last_save += 1
+                    print(f"Przetworzono łącznie {total_rows} wierszy.")
 
-    # Zapisz końcowy plik CSV
-    if all_data:
-        save_to_csv(all_data, filename="final_league_data.csv")
-        print(f"Zapisano końcowe dane ({len(all_data)} wierszy).")
-    else:
-        print("Nie udało się zebrać wystarczających danych.")
+                    # Co CHUNK_SIZE wierszy -> zapis
+                    if rows_since_last_save >= CHUNK_SIZE:
+                        save_chunk_to_csv(all_data)
+                        rows_since_last_save = 0
+
+                    if total_rows >= MAX_ROWS:
+                        break
+
+            time.sleep(1)  # minimalna przerwa
+
+            if total_rows >= MAX_ROWS:
+                break
+
+    # Jeśli zostały wiersze < CHUNK_SIZE
+    if rows_since_last_save > 0:
+        save_chunk_to_csv(all_data)
+
+    print("[DONE] Koniec zbierania danych.")
+    print(f"Zebrano łącznie {total_rows} wierszy.")
