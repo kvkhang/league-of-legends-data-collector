@@ -6,17 +6,20 @@ from aiohttp import ClientSession
 from aiolimiter import AsyncLimiter
 
 ###############################################################################
-# 1. KONFIGURACJA
+# 1. CONFIGURATION - EDIT THESE VALUES
 ###############################################################################
-RIOT_API_KEY = "RGAPI-8f0faf67-eeab-4da0-b629-f3c918cfaa38"  # <-- Twój klucz
-MATCH_REGION_BASE_URL = "https://europe.api.riotgames.com"   # Dla PUUID z EU
-BASE_DOMAIN = "eun1.api.riotgames.com"
+RIOT_API_KEY = "YOUR_RIOT_API_KEY_HERE" # https://developer.riotgames.com/
+MATCH_REGION_BASE_URL = "https://europe.api.riotgames.com"  # e.g. "https://americas.api.riotgames.com", "https://asia.api.riotgames.com"
+BASE_DOMAIN = "eun1.api.riotgames.com"   # e.g. "na1.api.riotgames.com", "euw1.api.riotgames.com", etc.
 
-CHUNK_SIZE = 50         # Co ile wierszy tworzymy NOWY plik CSV
-MAX_ROWS = 200000           # Ile łącznie wierszy chcemy pobrać
-MATCH_HISTORY_COUNT = 20 # Ile meczów pobieramy na 1 puuid w get_match_history
+CHUNK_SIZE = 50         # Every how many rows we create a NEW CSV file
+MAX_ROWS = 200000       # How many total rows we want to fetch
+MATCH_HISTORY_COUNT = 20  # How many matches to fetch per PUUID
 
-# Asynchroniczne ograniczenie do ~15 RPS (bez spamu w konsoli)
+# Replace with the PUUID you want to start from:
+INITIAL_PUUID = "EXAMPLE_PUUID_HERE" # https://developer.riotgames.com/apis#account-v1/GET_getByRiotId
+
+# Asynchronous limit to ~15 RPS (avoid console spam and hitting rate limits)
 RATE_LIMIT = AsyncLimiter(15, 1.0)
 
 HEADERS = {
@@ -45,17 +48,17 @@ summoner_rank_cache = {}
 champion_mastery_cache = {}
 
 ###############################################################################
-# 3. do_request - asynchroniczne zapytanie
+# 3. do_request - asynchronous HTTP request
 ###############################################################################
 async def do_request(session: ClientSession, url: str, method="GET", params=None, headers=None, retries=0, max_retries=5):
     """
-    Asynchroniczne zapytanie HTTP z ograniczeniem RPS (AsyncLimiter),
-    obsługą 429 i 5xx.
+    Asynchronous HTTP request with RPS limit (AsyncLimiter),
+    handling 429 and 5xx errors.
     """
     if headers is None:
         headers = {}
     if retries > max_retries:
-        print(f"[ERROR] Przekroczono limit prób ({max_retries}) dla URL: {url}")
+        print(f"[ERROR] Exceeded max retries limit ({max_retries}) for URL: {url}")
         return None
 
     async with RATE_LIMIT:
@@ -65,7 +68,7 @@ async def do_request(session: ClientSession, url: str, method="GET", params=None
             else:
                 resp = await session.request(method, url, params=params, headers=headers)
         except Exception as e:
-            print(f"[WARN] Wyjątek {e} (URL: {url}) - ponawiam za 2s...")
+            print(f"[WARN] Exception {e} (URL: {url}) - retrying in 2s...")
             await asyncio.sleep(2)
             return await do_request(session, url, method, params, headers, retries=retries+1)
 
@@ -73,11 +76,11 @@ async def do_request(session: ClientSession, url: str, method="GET", params=None
         return resp
     elif resp.status == 429:
         retry_after = int(resp.headers.get("Retry-After", 1))
-        print(f"[429] Osiągnięto limit. Czekam {retry_after}s (URL: {url})")
+        print(f"[429] Rate limit reached. Waiting {retry_after}s (URL: {url})")
         await asyncio.sleep(retry_after)
         return await do_request(session, url, method, params, headers, retries=retries+1)
     elif resp.status in [500, 502, 503, 504]:
-        print(f"[{resp.status}] Błąd serwera. Czekam 5s (URL: {url})")
+        print(f"[{resp.status}] Server error. Waiting 5s (URL: {url})")
         await asyncio.sleep(5)
         return await do_request(session, url, method, params, headers, retries=retries+1)
     else:
@@ -86,7 +89,7 @@ async def do_request(session: ClientSession, url: str, method="GET", params=None
         return None
 
 ###############################################################################
-# 4. FUNKCJE DO POBIERANIA DANYCH
+# 4. FUNCTIONS FOR DATA FETCHING
 ###############################################################################
 async def get_match_history(session, puuid, count=MATCH_HISTORY_COUNT):
     url = f"{MATCH_REGION_BASE_URL}/lol/match/v5/matches/by-puuid/{puuid}/ids"
@@ -226,7 +229,7 @@ def get_final_champion_stats(timeline_data, participant_id):
     return result
 
 ###############################################################################
-# 6. PRZETWARZANIE DANYCH
+# 6. DATA PROCESSING
 ###############################################################################
 async def process_match_data(session, match_data, timeline_data, puuid_pool):
     if not match_data:
@@ -263,12 +266,12 @@ async def process_match_data(session, match_data, timeline_data, puuid_pool):
         champion_id = part.get("championId")
         mastery_data = await get_champion_mastery(session, p, champion_id)
 
-        # Konwersja champion_mastery_lastPlayTime -> int
+        # Convert champion_mastery_lastPlayTime -> int
         raw_last_play = mastery_data.get("champion_mastery_lastPlayTime")
         if isinstance(raw_last_play, float):
             raw_last_play = int(raw_last_play)
 
-        # Ewentualna konwersja do daty
+        # Potential date conversion
         if raw_last_play:
             dt_lp = datetime.datetime.utcfromtimestamp(raw_last_play / 1000.0)
             champion_mastery_lastPlayTime_utc = dt_lp.isoformat() + "Z"
@@ -360,18 +363,18 @@ async def process_match_data(session, match_data, timeline_data, puuid_pool):
     return rows
 
 ###############################################################################
-# 7. ZAPISYWANIE CHUNKAMI Z USUWANIEM POPRZEDNIEGO
+# 7. SAVING IN CHUNKS AND REMOVING THE PREVIOUS FILE
 ###############################################################################
 def save_chunk_to_csv(all_data, total_rows):
     """
-    Tworzy plik league_data_{total_rows}.csv z CAŁĄ dotychczasową listą all_data,
-    a następnie usuwa plik poprzedniego chunku (league_data_{total_rows-CHUNK_SIZE}.csv).
+    Creates a file new_league_data_{total_rows}.csv with all the current all_data,
+    then removes the previous chunk file (new_league_data_{total_rows-CHUNK_SIZE}.csv).
     """
     if not all_data:
         return
 
-    row_count = len(all_data)  # w pamięci
-    filename = f"league_data_{total_rows}.csv"
+    row_count = len(all_data)
+    filename = f"new_league_data_{total_rows}.csv"
     keys = all_data[0].keys()
 
     with open(filename, "w", newline="", encoding="utf-8") as f:
@@ -379,22 +382,20 @@ def save_chunk_to_csv(all_data, total_rows):
         writer.writeheader()
         writer.writerows(all_data)
 
-    print(f"[SAVE] Zapisano {row_count} wierszy (cumulative) do pliku: {filename}")
+    print(f"[SAVE] Wrote {row_count} rows (cumulative) to file: {filename}")
 
-    # Usunięcie starego chunku
     prev_count = total_rows - CHUNK_SIZE
     if prev_count > 0:
-        prev_filename = f"league_data_{prev_count}.csv"
+        prev_filename = f"new_league_data_{prev_count}.csv"
         if os.path.exists(prev_filename):
             os.remove(prev_filename)
-            print(f"Usunięto poprzedni plik: {prev_filename}")
+            print(f"Removed previous file: {prev_filename}")
 
 ###############################################################################
-# 8. GŁÓWNA FUNKCJA
+# 8. MAIN FUNCTION
 ###############################################################################
 async def main():
-    initial_puuid = "1KsVizuCBGvjF6QwkrfiQ0vrukMNZHAMw7t8fqn-knBGm3fmAsGunqCRn17q3ipY63Re8Y-ZkHIYaw"
-    puuid_pool = {initial_puuid}
+    puuid_pool = {INITIAL_PUUID}
     processed_matches = set()
 
     all_data = []
@@ -404,23 +405,23 @@ async def main():
     async with ClientSession() as session:
         while total_rows < MAX_ROWS and puuid_pool:
             current_puuid = puuid_pool.pop()
-            print(f"[INFO] Pobieram historię meczów dla PUUID: {current_puuid}")
+            print(f"[INFO] Fetching match history for PUUID: {current_puuid}")
             match_ids = await get_match_history(session, current_puuid, count=MATCH_HISTORY_COUNT)
 
             if not match_ids:
-                print(f"[WARN] Brak match_ids dla {current_puuid} lub błąd przy pobieraniu.")
+                print(f"[WARN] No match_ids for {current_puuid} or error while fetching.")
                 continue
 
             for match_id in match_ids:
                 if match_id in processed_matches:
                     continue
 
-                print(f"[INFO] -> Szczegóły meczu {match_id}")
+                print(f"[INFO] -> Match details {match_id}")
                 match_details = await get_match_details(session, match_id)
                 if match_details:
                     processed_matches.add(match_id)
 
-                    print(f"[INFO] -> Timeline meczu {match_id}")
+                    print(f"[INFO] -> Match timeline {match_id}")
                     timeline = await get_match_timeline(session, match_id)
 
                     new_rows = await process_match_data(session, match_details, timeline, puuid_pool)
@@ -429,28 +430,25 @@ async def main():
                         total_rows += 1
                         rows_since_last_save += 1
 
-                        print(f"Przetworzono łącznie {total_rows} wierszy.")
+                        print(f"Processed a total of {total_rows} rows.")
 
-                        # Po osiągnięciu CHUNK_SIZE -> zapis pliku
                         if rows_since_last_save >= CHUNK_SIZE:
                             save_chunk_to_csv(all_data, total_rows)
-                            # Nie czyścimy all_data - chcemy plik cumulative
                             rows_since_last_save = 0
 
                         if total_rows >= MAX_ROWS:
-                            print("[INFO] Osiągnięto limit MAX_ROWS.")
+                            print("[INFO] MAX_ROWS limit reached.")
                             break
 
                 if total_rows >= MAX_ROWS:
                     break
 
-    # Jeśli został niedomknięty chunk
+    # If there's an unsaved chunk
     if all_data and (total_rows % CHUNK_SIZE != 0):
         save_chunk_to_csv(all_data, total_rows)
 
-    print("[DONE] Koniec zbierania danych.")
-    print(f"Zebrano łącznie {total_rows} wierszy.")
-
+    print("[DONE] Data collection complete.")
+    print(f"Collected a total of {total_rows} rows.")
 
 ###############################################################################
 # 9. START
