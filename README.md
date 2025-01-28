@@ -39,17 +39,9 @@ An asynchronous Python script to collect League of Legends match data from the R
 
 1.  **Clone** this repository:
     
-    bash
-    
-    KopiujEdytuj
-    
     `git clone https://github.com/YourUsername/YourRepoName.git` 
     
 2.  **Install required libraries**:
-    
-    bash
-    
-    KopiujEdytuj
     
     `pip install aiohttp aiolimiter` 
     
@@ -57,10 +49,6 @@ An asynchronous Python script to collect League of Legends match data from the R
 ### Configuration
 
 Open the script file and locate the **Configuration** section at the top (labeled `# 1. CONFIGURATION - EDIT THESE VALUES`):
-
-python
-
-KopiujEdytuj
 
 `RIOT_API_KEY = "YOUR_RIOT_API_KEY_HERE"
 MATCH_REGION_BASE_URL = "https://europe.api.riotgames.com"
@@ -83,10 +71,6 @@ INITIAL_PUUID = "EXAMPLE_PUUID_HERE"`
 
 Run the script from your command line:
 
-bash
-
-KopiujEdytuj
-
 `python your_script_name.py` 
 
 The script will:
@@ -108,10 +92,6 @@ The script will:
     -   Defines constants in the `CONFIGURATION` section (e.g., `RIOT_API_KEY`, `MATCH_REGION_BASE_URL`, etc.).
 2.  **Caching**:
     
-    python
-    
-    KopiujEdytuj
-    
     `match_details_cache = {}
     match_timeline_cache = {}
     summoner_rank_cache = {}
@@ -119,10 +99,6 @@ The script will:
     
     -   These dictionaries store previously fetched data (like match details, timelines, summoner rank info, and champion mastery) to avoid re-fetching.
 3.  **`do_request` Function**:
-    
-    python
-    
-    KopiujEdytuj
     
     `async def do_request(session, url, method="GET", ...):
         ...` 
@@ -139,19 +115,11 @@ The script will:
     -   **`get_champion_mastery(session, puuid, champion_id)`**: Returns champion mastery info for a summoner + champion.
 5.  **`get_final_champion_stats`**:
     
-    python
-    
-    KopiujEdytuj
-    
     `def get_final_champion_stats(timeline_data, participant_id):
         ...` 
     
     -   Extracts final champion stats (armor, MR, AD, etc.) from the last frame of the timeline data for the participant in question.
 6.  **`process_match_data`**:
-    
-    python
-    
-    KopiujEdytuj
     
     `async def process_match_data(session, match_data, timeline_data, puuid_pool):
         ...` 
@@ -167,10 +135,6 @@ The script will:
 8.  **`main()`** Function:
     
     -   Initializes:
-        
-        python
-        
-        KopiujEdytuj
         
         `puuid_pool = {INITIAL_PUUID}
         processed_matches = set()
