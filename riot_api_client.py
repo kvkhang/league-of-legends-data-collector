@@ -4,20 +4,24 @@ import csv
 import os
 from aiohttp import ClientSession
 from aiolimiter import AsyncLimiter
+from dotenv import load_dotenv
 
 ###############################################################################
 # 1. CONFIGURATION - EDIT THESE VALUES
 ###############################################################################
-RIOT_API_KEY = "YOUR_RIOT_API_KEY_HERE" # https://developer.riotgames.com/
-MATCH_REGION_BASE_URL = "https://europe.api.riotgames.com"  # e.g. "https://americas.api.riotgames.com", "https://asia.api.riotgames.com"
-BASE_DOMAIN = "eun1.api.riotgames.com"   # e.g. "na1.api.riotgames.com", "euw1.api.riotgames.com", etc.
+
+load_dotenv()
+
+RIOT_API_KEY = os.getenv('API_KEY') # https://developer.riotgames.com/
+MATCH_REGION_BASE_URL = "https://americas.api.riotgames.com"  # e.g. "https://americas.api.riotgames.com", "https://asia.api.riotgames.com"
+BASE_DOMAIN = "na1.api.riotgames.com"   # e.g. "na1.api.riotgames.com", "euw1.api.riotgames.com", etc.
 
 CHUNK_SIZE = 50         # Every how many rows we create a NEW CSV file
 MAX_ROWS = 200000       # How many total rows we want to fetch
 MATCH_HISTORY_COUNT = 20  # How many matches to fetch per PUUID
 
 # Replace with the PUUID you want to start from:
-INITIAL_PUUID = "EXAMPLE_PUUID_HERE" # https://developer.riotgames.com/apis#account-v1/GET_getByRiotId
+INITIAL_PUUID = "bjX-SfKiwocw9FoOn51SSeal2Kzvjkrk1LyrVGxouxGbachrQW1maka05uMdWua9cEeXAbvFprMotw" # https://developer.riotgames.com/apis#account-v1/GET_getByRiotId
 
 # Asynchronous limit to ~15 RPS (avoid console spam and hitting rate limits)
 RATE_LIMIT = AsyncLimiter(15, 1.0)
@@ -425,6 +429,8 @@ async def main():
                     timeline = await get_match_timeline(session, match_id)
 
                     new_rows = await process_match_data(session, match_details, timeline, puuid_pool)
+                    if new_rows[8] != 420:
+                        break
                     for row in new_rows:
                         all_data.append(row)
                         total_rows += 1
